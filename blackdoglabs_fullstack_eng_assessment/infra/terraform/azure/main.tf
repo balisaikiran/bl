@@ -285,3 +285,75 @@ resource "azurerm_api_management" "main" {
   tags                = local.common_tags
 }
 
+# =============================================================================
+# Networking (VNet, Subnets, Private Endpoints)
+# =============================================================================
+# Note: Container Apps Environment can be integrated with VNet for private networking
+# For production, consider:
+# - VNet integration for Container Apps
+# - Private endpoints for database access
+# - Network Security Groups for subnet isolation
+# - NAT Gateway for outbound internet access
+
+# Example VNet (commented out - uncomment and configure for production)
+# resource "azurerm_virtual_network" "main" {
+#   name                = "vnet-${local.resource_prefix}"
+#   address_space       = ["10.0.0.0/16"]
+#   location            = azurerm_resource_group.main.location
+#   resource_group_name = azurerm_resource_group.main.name
+#   tags                = local.common_tags
+# }
+#
+# resource "azurerm_subnet" "app" {
+#   name                 = "subnet-app"
+#   resource_group_name  = azurerm_resource_group.main.name
+#   virtual_network_name  = azurerm_virtual_network.main.name
+#   address_prefixes     = ["10.0.2.0/24"]
+# }
+#
+# resource "azurerm_subnet" "data" {
+#   name                 = "subnet-data"
+#   resource_group_name  = azurerm_resource_group.main.name
+#   virtual_network_name  = azurerm_virtual_network.main.name
+#   address_prefixes     = ["10.0.3.0/24"]
+# }
+
+# Private endpoint for SQL Database (if using SQL)
+# resource "azurerm_private_endpoint" "sql" {
+#   count               = var.database_type == "sql" ? 1 : 0
+#   name                = "pe-sql-${local.resource_prefix}"
+#   location            = azurerm_resource_group.main.location
+#   resource_group_name = azurerm_resource_group.main.name
+#   subnet_id           = azurerm_subnet.data[0].id
+#
+#   private_service_connection {
+#     name                           = "psc-sql-${local.resource_prefix}"
+#     private_connection_resource_id = azurerm_mssql_server.main[0].id
+#     subresource_names              = ["sqlServer"]
+#     is_manual_connection           = false
+#   }
+#   tags = local.common_tags
+# }
+
+# =============================================================================
+# State Management Notes
+# =============================================================================
+# For production deployments:
+# 1. Use remote state backend (Azure Storage, S3, Terraform Cloud)
+# 2. Enable state locking to prevent concurrent modifications
+# 3. Use workspaces for environment separation (dev/staging/prod)
+# 4. Example backend configuration:
+#    terraform {
+#      backend "azurerm" {
+#        resource_group_name  = "rg-terraform-state"
+#        storage_account_name = "stterraformstate"
+#        container_name       = "tfstate"
+#        key                  = "analytics-platform.terraform.tfstate"
+#      }
+#    }
+# 5. Use terraform workspaces:
+#    terraform workspace new dev
+#    terraform workspace new staging
+#    terraform workspace new prod
+# 6. Consider using terraform-cloud for team collaboration
+

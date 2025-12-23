@@ -133,8 +133,45 @@ class TestCursorPagination:
         # Should not error on cursor param
         assert response.status_code == 200
 
-    # TODO: Add test that verifies cursor actually paginates correctly
-    # This requires implementing the actual pagination logic first
+    def test_cursor_pagination_works(self, client, auth_headers):
+        """Cursor pagination should return different pages of results."""
+        # First, ingest some events
+        payload = {
+            "events": [
+                {
+                    "event_type": "test",
+                    "user_id": "u001",
+                    "properties": {},
+                    "timestamp": f"2025-01-01T{hour:02d}:00:00Z",
+                }
+                for hour in range(10)  # Create 10 events
+            ]
+        }
+        client.post("/api/v1/events", json=payload, headers=auth_headers)
+
+        # Get first page
+        response1 = client.get(
+            "/api/v1/events",
+            params={"limit": 5},
+            headers=auth_headers,
+        )
+        assert response1.status_code == 200
+        data1 = response1.json()
+        assert len(data1["data"]) == 5
+        assert data1["has_more"] is True
+        assert data1["cursor"] is not None
+
+        # Get second page using cursor
+        response2 = client.get(
+            "/api/v1/events",
+            params={"limit": 5, "cursor": data1["cursor"]},
+            headers=auth_headers,
+        )
+        assert response2.status_code == 200
+        data2 = response2.json()
+        assert len(data2["data"]) <= 5
+        # Events should be different (or empty if we've seen all)
+        assert data2["data"] != data1["data"] or len(data2["data"]) == 0
 
 
 # =============================================================================

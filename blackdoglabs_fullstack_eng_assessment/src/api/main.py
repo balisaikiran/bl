@@ -4,8 +4,12 @@
 
 import time
 import logging
+import base64
+import json
+from datetime import datetime, timedelta
 from typing import Annotated
 from contextlib import asynccontextmanager
+from collections import defaultdict
 
 from fastapi import FastAPI, Request, Depends, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +20,9 @@ from .schemas import (
     EventsIngestRequest,
     EventsIngestResponse,
     EventsQueryResponse,
+    Event,
     MetricsSummaryResponse,
+    DailyMetrics,
     TokenClaims,
 )
 
@@ -32,10 +38,55 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     logger.info("Starting Analytics API...")
-    # TODO: Initialize DB connections, caches, etc.
+    # Initialize in-memory stores with sample data
+    _initialize_sample_data()
     yield
     logger.info("Shutting down Analytics API...")
-    # TODO: Cleanup resources
+    # Cleanup resources (in-memory stores will be cleared on shutdown)
+
+
+def _initialize_sample_data():
+    """Initialize in-memory stores with sample data for testing."""
+    # Sample events for org001
+    sample_events = [
+        Event(
+            event_id="evt_001",
+            org_id="org001",
+            user_id="u001",
+            event_type="page_view",
+            properties={"path": "/dashboard", "referrer": "google.com"},
+            timestamp=datetime(2025, 12, 15, 9, 0, 0),
+        ),
+        Event(
+            event_id="evt_002",
+            org_id="org001",
+            user_id="u002",
+            event_type="button_click",
+            properties={"button_id": "submit_form", "page": "/settings"},
+            timestamp=datetime(2025, 12, 15, 9, 15, 0),
+        ),
+        Event(
+            event_id="evt_003",
+            org_id="org001",
+            user_id="u001",
+            event_type="page_view",
+            properties={"path": "/reports"},
+            timestamp=datetime(2025, 12, 15, 10, 0, 0),
+        ),
+    ]
+    _events_store["org001"].extend(sample_events)
+
+    # Sample metrics for org001
+    _metrics_store["org001"]["2025-12-15"] = {
+        "page_views": 150.0,
+        "unique_users": 12.0,
+        "button_clicks": 45.0,
+    }
+    _metrics_store["org001"]["2025-12-16"] = {
+        "page_views": 180.0,
+        "unique_users": 15.0,
+        "button_clicks": 52.0,
+    }
 
 
 app = FastAPI(
@@ -114,11 +165,52 @@ async def verify_token(
     # from jose import jwt, JWTError
     # try:
     #     payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    #     return TokenClaims(
+    #         sub=payload.get("sub"),
+    #         org_id=payload.get("org_id"),
+    #         role=payload.get("role"),
+    #         iat=payload.get("iat"),
+    #         exp=payload.get("exp"),
+    #     )
     # except JWTError:
     #     raise HTTPException(status_code=401, detail="Invalid token")
 
-    # Mock: Return fake claims for development
-    # Replace with actual token parsing
+    # Mock implementation: Try to extract org_id from token
+    # In production, this would be decoded from JWT claims
+    # For now, support simple format: "org001:u001" or just use default
+    try:
+        # Try to decode as base64 JSON (mock JWT payload)
+        import base64
+        parts = token.split(".")
+        if len(parts) >= 2:
+            # Mock JWT structure: header.payload.signature
+            payload_b64 = parts[1]
+            # Add padding if needed
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            payload_json = base64.urlsafe_b64decode(payload_b64)
+            payload = json.loads(payload_json)
+            return TokenClaims(
+                sub=payload.get("sub", "u001"),
+                org_id=payload.get("org_id", "org001"),
+                role=payload.get("role", "admin"),
+                iat=payload.get("iat", int(time.time())),
+                exp=payload.get("exp", int(time.time()) + 3600),
+            )
+    except Exception:
+        pass
+
+    # Fallback: Extract org_id from token if it's in format "org001:..."
+    if ":" in token:
+        org_id = token.split(":")[0]
+        return TokenClaims(
+            sub=token.split(":")[1] if len(token.split(":")) > 1 else "u001",
+            org_id=org_id,
+            role="admin",
+            iat=int(time.time()),
+            exp=int(time.time()) + 3600,
+        )
+
+    # Default mock claims for development
     return TokenClaims(
         sub="u001",
         org_id="org001",
@@ -142,11 +234,43 @@ async def health_check():
 
 
 # =============================================================================
-# Events API
+# In-Memory Data Stores
 # =============================================================================
 
+# In-memory store for events (use PostgreSQL/CosmosDB in production)
+# Structure: {org_id: [Event, ...]}
+_events_store: dict[str, list[Event]] = defaultdict(list)
+
 # In-memory store for idempotency keys (use Redis in production)
+# Structure: {idempotency_key: response_data}
 _idempotency_store: dict[str, dict] = {}
+
+# In-memory store for metrics (use database in production)
+# Structure: {org_id: {date: {metric_name: value}}}
+_metrics_store: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
+
+
+def _generate_event_id() -> str:
+    """Generate a unique event ID."""
+    timestamp = int(time.time() * 1000)
+    random_suffix = base64.urlsafe_b64encode(str(time.perf_counter()).encode()).decode()[:8]
+    return f"evt_{timestamp}_{random_suffix}"
+
+
+def _encode_cursor(event_id: str, timestamp: datetime) -> str:
+    """Encode cursor from event_id and timestamp."""
+    cursor_data = {"event_id": event_id, "timestamp": timestamp.isoformat()}
+    cursor_json = json.dumps(cursor_data)
+    return base64.urlsafe_b64encode(cursor_json.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> dict | None:
+    """Decode cursor to get event_id and timestamp."""
+    try:
+        cursor_json = base64.urlsafe_b64decode(cursor.encode()).decode()
+        return json.loads(cursor_json)
+    except Exception:
+        return None
 
 
 @app.post(
@@ -169,37 +293,59 @@ async def ingest_events(
     - Checks idempotency key to prevent duplicate processing
     - Associates events with org_id from auth token
     """
-    # TODO: Implement idempotency check
-    # 1. Check if x_idempotency_key exists in store
-    # 2. If exists, return cached response (409 or replay original)
-    # 3. If not, process events and store key with response
+    org_id = user.org_id
 
-    if x_idempotency_key and x_idempotency_key in _idempotency_store:
-        # Return cached response for duplicate request
-        raise HTTPException(
-            status_code=409,
-            detail="Duplicate request - idempotency key already processed",
-        )
+    # Check idempotency: if key exists, return 409 Conflict
+    if x_idempotency_key:
+        # Create a composite key with org_id to ensure tenant isolation
+        composite_key = f"{org_id}:{x_idempotency_key}"
+        if composite_key in _idempotency_store:
+            # Return 409 Conflict for duplicate idempotency key
+            raise HTTPException(
+                status_code=409,
+                detail="Duplicate request - idempotency key already processed",
+            )
 
-    # TODO: Validate batch size (1-100 events)
+    # Validate batch size (1-100 events)
     if len(request.events) < 1 or len(request.events) > 100:
         raise HTTPException(
             status_code=400,
             detail="Batch must contain 1-100 events",
         )
 
-    # TODO: Store events with org_id from token
-    # For now, just acknowledge receipt
-    org_id = user.org_id
+    # Process and store events
+    stored_events = []
+    for event_payload in request.events:
+        # Generate event ID
+        event_id = _generate_event_id()
+        
+        # Use server timestamp if not provided
+        event_timestamp = event_payload.timestamp or datetime.utcnow()
+        
+        # Create Event object
+        event = Event(
+            event_id=event_id,
+            org_id=org_id,
+            user_id=event_payload.user_id,
+            event_type=event_payload.event_type,
+            properties=event_payload.properties or {},
+            timestamp=event_timestamp,
+        )
+        
+        # Store event
+        _events_store[org_id].append(event)
+        stored_events.append(event)
 
+    # Create response
     response = EventsIngestResponse(
-        accepted=len(request.events),
+        accepted=len(stored_events),
         org_id=org_id,
     )
 
-    # Store idempotency key
+    # Store idempotency key with composite key for tenant isolation
     if x_idempotency_key:
-        _idempotency_store[x_idempotency_key] = response.model_dump()
+        composite_key = f"{org_id}:{x_idempotency_key}"
+        _idempotency_store[composite_key] = response.model_dump()
 
     return response
 
@@ -229,17 +375,74 @@ async def query_events(
     """
     org_id = user.org_id
 
-    # TODO: Implement cursor-based pagination
-    # 1. Decode cursor to get last seen event_id or timestamp
-    # 2. Query: WHERE org_id = ? AND id > cursor ORDER BY id LIMIT limit+1
-    # 3. has_more = len(results) > limit
-    # 4. Generate next cursor from last item
+    # Get events for this org
+    org_events = _events_store.get(org_id, [])
 
-    # Mock response
+    # Parse date filters
+    start_dt = None
+    end_dt = None
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid start_date format")
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid end_date format")
+
+    # Decode cursor to get starting point
+    cursor_event_id = None
+    cursor_timestamp = None
+    if cursor:
+        cursor_data = _decode_cursor(cursor)
+        if cursor_data:
+            cursor_event_id = cursor_data.get("event_id")
+            if cursor_data.get("timestamp"):
+                try:
+                    cursor_timestamp = datetime.fromisoformat(cursor_data["timestamp"])
+                except ValueError:
+                    pass
+
+    # Filter events
+    filtered_events = []
+    for event in org_events:
+        # Skip events before cursor
+        if cursor_event_id and event.event_id <= cursor_event_id:
+            continue
+        if cursor_timestamp and event.timestamp <= cursor_timestamp:
+            continue
+
+        # Apply filters
+        if user_id and event.user_id != user_id:
+            continue
+        if event_type and event.event_type != event_type:
+            continue
+        if start_dt and event.timestamp < start_dt:
+            continue
+        if end_dt and event.timestamp > end_dt:
+            continue
+
+        filtered_events.append(event)
+
+    # Sort by timestamp descending (most recent first)
+    filtered_events.sort(key=lambda e: e.timestamp, reverse=True)
+
+    # Apply pagination: fetch limit+1 to check if there are more
+    has_more = len(filtered_events) > limit
+    paginated_events = filtered_events[:limit]
+
+    # Generate next cursor from last event
+    next_cursor = None
+    if has_more and paginated_events:
+        last_event = paginated_events[-1]
+        next_cursor = _encode_cursor(last_event.event_id, last_event.timestamp)
+
     return EventsQueryResponse(
-        data=[],
-        cursor=None,
-        has_more=False,
+        data=paginated_events,
+        cursor=next_cursor,
+        has_more=has_more,
     )
 
 
@@ -267,19 +470,64 @@ async def get_metrics_summary(
     """
     org_id = user.org_id
 
-    # TODO: Query metrics from database
-    # 1. Filter by org_id, date range, and optional metrics list
-    # 2. Aggregate by date
-    # 3. Calculate totals across all dates
+    # Parse date range
+    try:
+        start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format")
 
-    # Mock response
+    if start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="start_date must be before end_date")
+
+    # Get metrics for this org
+    org_metrics = _metrics_store.get(org_id, {})
+
+    # Aggregate metrics by date
+    daily_breakdown: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    totals: dict[str, float] = defaultdict(float)
+
+    # Iterate through dates in range
+    current_date = start_dt.date()
+    end_date_obj = end_dt.date()
+
+    while current_date <= end_date_obj:
+        date_str = current_date.isoformat()
+        date_metrics = org_metrics.get(date_str, {})
+
+        # Filter by metric names if specified
+        if metrics:
+            date_metrics = {k: v for k, v in date_metrics.items() if k in metrics}
+
+        # Add to daily breakdown
+        for metric_name, value in date_metrics.items():
+            daily_breakdown[date_str][metric_name] = value
+            totals[metric_name] += value
+
+        current_date += timedelta(days=1)
+
+    # Convert to response format
+    daily_data = [
+        DailyMetrics(date=date, metrics=metrics_dict)
+        for date, metrics_dict in sorted(daily_breakdown.items())
+    ]
+
     return MetricsSummaryResponse(
-        data=[],
-        totals={},
+        data=daily_data,
+        totals=dict(totals),
     )
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    import sys
+    import os
+    
+    # Add parent directory to path to allow imports when running directly
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+    
+    # Run as module from project root: python -m src.api.main
+    # Or use: uvicorn src.api.main:app --reload
+    # Or run from project root: uv run uvicorn src.api.main:app --reload
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
 
