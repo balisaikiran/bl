@@ -76,17 +76,8 @@ def _initialize_sample_data():
     ]
     _events_store["org001"].extend(sample_events)
 
-    # Sample metrics for org001
-    _metrics_store["org001"]["2025-12-15"] = {
-        "page_views": 150.0,
-        "unique_users": 12.0,
-        "button_clicks": 45.0,
-    }
-    _metrics_store["org001"]["2025-12-16"] = {
-        "page_views": 180.0,
-        "unique_users": 15.0,
-        "button_clicks": 52.0,
-    }
+    # Note: Metrics are now calculated dynamically from events
+    # No hardcoded metrics - they will be computed on-demand
 
 
 app = FastAPI(
@@ -480,36 +471,71 @@ async def get_metrics_summary(
     if start_dt > end_dt:
         raise HTTPException(status_code=400, detail="start_date must be before end_date")
 
-    # Get metrics for this org
-    org_metrics = _metrics_store.get(org_id, {})
+    # Calculate metrics dynamically from events
+    org_events = _events_store.get(org_id, [])
 
-    # Aggregate metrics by date
+    # Aggregate metrics by date from events
     daily_breakdown: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    daily_unique_users: dict[str, set[str]] = defaultdict(set)  # Track unique users per day
     totals: dict[str, float] = defaultdict(float)
 
-    # Iterate through dates in range
+    # Process events and calculate metrics
+    for event in org_events:
+        event_date = event.timestamp.date()
+        
+        # Check if event is within date range
+        if event_date < start_dt.date() or event_date > end_dt.date():
+            continue
+
+        date_str = event_date.isoformat()
+
+        # Map event types to metric names
+        event_type_to_metric = {
+            "page_view": "page_views",
+            "button_click": "button_clicks",
+            "feature_used": "feature_uses",
+            "api_call": "api_calls",
+        }
+
+        # Count events by type
+        metric_name = event_type_to_metric.get(event.event_type, f"{event.event_type}_count")
+        
+        # Filter by requested metrics if specified
+        if metrics and metric_name not in metrics:
+            continue
+
+        # Increment metric count
+        daily_breakdown[date_str][metric_name] += 1.0
+        totals[metric_name] += 1.0
+
+        # Track unique users per day
+        daily_unique_users[date_str].add(event.user_id)
+
+    # Add unique users count to daily breakdown
+    all_unique_users = set()
+    for date_str, unique_user_set in daily_unique_users.items():
+        unique_count = float(len(unique_user_set))
+        daily_breakdown[date_str]["unique_users"] = unique_count
+        all_unique_users.update(unique_user_set)
+    
+    # Total unique users across entire date range (not sum of daily counts)
+    totals["unique_users"] = float(len(all_unique_users))
+
+    # Ensure all dates in range are included (even if no events)
     current_date = start_dt.date()
     end_date_obj = end_dt.date()
-
+    
     while current_date <= end_date_obj:
         date_str = current_date.isoformat()
-        date_metrics = org_metrics.get(date_str, {})
-
-        # Filter by metric names if specified
-        if metrics:
-            date_metrics = {k: v for k, v in date_metrics.items() if k in metrics}
-
-        # Add to daily breakdown
-        for metric_name, value in date_metrics.items():
-            daily_breakdown[date_str][metric_name] = value
-            totals[metric_name] += value
-
+        if date_str not in daily_breakdown:
+            daily_breakdown[date_str] = {}
         current_date += timedelta(days=1)
 
     # Convert to response format
     daily_data = [
         DailyMetrics(date=date, metrics=metrics_dict)
         for date, metrics_dict in sorted(daily_breakdown.items())
+        if metrics_dict  # Only include dates with metrics
     ]
 
     return MetricsSummaryResponse(
