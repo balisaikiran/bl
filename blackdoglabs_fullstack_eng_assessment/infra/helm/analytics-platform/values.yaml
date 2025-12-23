@@ -1,0 +1,121 @@
+# Default values for analytics-platform
+# TODO: Customize for your environment
+
+# =============================================================================
+# Global settings
+# =============================================================================
+global:
+  environment: dev
+  imagePullSecrets: []
+
+# =============================================================================
+# API (FastAPI Backend)
+# =============================================================================
+api:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: your-registry/analytics-api
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Environment variables
+  env:
+    LOG_LEVEL: INFO
+    # Add database connection, secrets references, etc.
+
+  # Health checks
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 10
+    periodSeconds: 30
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+  # Autoscaling
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+
+# =============================================================================
+# App (Next.js Dashboard)
+# =============================================================================
+app:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: your-registry/analytics-dashboard
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 3000
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  env:
+    NEXT_PUBLIC_ANALYTICS_API_URL: "http://analytics-api:8000"
+
+# =============================================================================
+# Ingress
+# =============================================================================
+ingress:
+  enabled: true
+  className: nginx  # or: alb, traefik, etc.
+  annotations:
+    # nginx.ingress.kubernetes.io/rewrite-target: /
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: analytics.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: api
+        - path: /
+          pathType: Prefix
+          service: app
+  tls: []
+  # - secretName: analytics-tls
+  #   hosts:
+  #     - analytics.example.com
+
+# =============================================================================
+# Secrets (reference external secrets or create)
+# =============================================================================
+secrets:
+  # Reference existing secrets
+  existingSecret: ""
+  # Or create secrets (not recommended for production)
+  create: false
+  data: {}
+

@@ -1,0 +1,19 @@
+# App (Dashboard) Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "analytics-platform.fullname" . }}-app
+  labels:
+    {{- include "analytics-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  type: {{ .Values.app.service.type }}
+  ports:
+    - port: {{ .Values.app.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "analytics-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+
